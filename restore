@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# UNIT8200-STYLE /etc REGAIN CONTROL SUITE (DEFENSIVE SAFE)
+# sl0ppy edition – forensic + recovery + live monitoring
+
+LOGDIR="/var/log/regain-control"
+mkdir -p "$LOGDIR"
+
+echo "[*] Regain Control Suite starting..."
+sleep 1
+
+############################################################
+# 1. ENUMERATE ATTRIBUTES IN /etc
+############################################################
+echo "[*] Enumerating file attributes in /etc..."
+find /etc -xdev -print0 | while IFS= read -r -d '' f; do
+    attr=$(lsattr -d "$f" 2>/dev/null | awk '{print $1}')
+    echo "$attr  $f"
+done | tee "$LOGDIR/attributes_initial.txt"
+
+
+############################################################
+# 2. REMOVE IMMUTABLE/APPEND ATTRIBUTES SAFELY
+############################################################
+echo "[*] Removing immutable/append-only flags (safe restore)..."
+find /etc -xdev -print0 | while IFS= read -r -d '' f; do
+    chattr -i -a "$f" 2>/dev/null
+done
+echo "[+] Attribute locks removed."
+
+
+############################################################
+# 3. FIND NON-ROOT OWNERSHIP
+############################################################
+echo "[*] Searching for incorrect file owners..."
+find /etc -xdev \( -not -user root -o -not -group root \) \
+    -printf "%u:%g %p\n" | tee "$LOGDIR/bad_ownership.txt"
+
+echo "[*] Fixing ownership ONLY on affected files..."
+while read -r line; do
+    file=$(echo "$line" | awk '{print $2}')
+    chown root:root "$file" 2>/dev/null
+done < "$LOGDIR/bad_ownership.txt"
+echo "[+] Ownership restored for tampered entries."
+
+
+############################################################
+# 4. PERMISSION ANOMALY DETECTION
+############################################################
+echo "[*] Detecting odd or insecure permissions..."
+find /etc -type f -perm /002 -printf "%m %p\n" | tee "$LOGDIR/bad_permissions.txt"
+
+echo "[*] Fixing insecure permissions..."
+while read -r line; do
+    file=$(echo "$line" | awk '{print $2}')
+    chmod o-rwx "$file" 2>/dev/null
+done < "$LOGDIR/bad_permissions.txt"
+echo "[+] Permissions normalized."
+
+
+############################################################
+# 5. HASH MAP /etc FOR FORENSIC INTEGRITY BASELINE
+############################################################
+echo "[*] Creating hash baseline..."
+find /etc -type f -exec sha256sum {} \; | sort -k2 > "$LOGDIR/etc_hashmap.txt"
+echo "[+] Hash map saved to $LOGDIR/etc_hashmap.txt"
+
+
+############################################################
+# 6. LIVE MONITORING ENGINE
+############################################################
+echo "[*] Creating live monitoring process..."
+cat > /usr/local/bin/etc_monitor.sh << 'EOF'
+#!/usr/bin/env bash
+inotifywait -m -e modify,attrib,create,delete,move /etc | while read -r line; do
+    echo "$(date)  $line" >> /var/log/regain-control/etc_live_monitor.log
+done
+EOF
+
+chmod +x /usr/local/bin/etc_monitor.sh
+
+echo "[*] Creating systemd unit for the monitor..."
+
+cat > /etc/systemd/system/etc-monitor.service << 'EOF'
+[Unit]
+Description=Live /etc tamper monitor
+
+[Service]
+ExecStart=/usr/local/bin/etc_monitor.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now etc-monitor.service
+
+echo "[+] Live monitoring activated."
+
+
+############################################################
+# 7. SUMMARY
+############################################################
+echo ""
+echo "========================================================="
+echo "     UNIT8200 /etc REGAIN CONTROL SUITE COMPLETED        "
+echo "========================================================="
+echo "Logs saved in: $LOGDIR"
+echo "Live monitor:  journalctl -u etc-monitor.service -f"
+echo "========================================================="
